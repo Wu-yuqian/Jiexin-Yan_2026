@@ -1,0 +1,561 @@
+---
+title: "Jiexin-Yan_2026 scATAC-seq of LSK cells from naive or DM mice"
+author: "WuYuqian"
+date: "2026-03-29"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+scATAC-seq of LSK cells from naive or DM mice.
+
+## Packages
+
+```{r}
+library(Signac)
+library(Seurat)
+library(ArchR)
+library(dplyr)
+library(GenomicRanges)
+library(future)
+library(ggplot2)
+library(ggrepel)
+library(patchwork)
+library(AnnotationHub)
+library(rtracklayer)
+library(monocle3)
+library(presto)
+library(JASPAR2020)
+library(TFBSTools)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(SeuratWrappers)
+plan("multicore", workers = 8)
+options(future.globals.maxSize = 200 * 1024^3)
+```
+
+## Data loading
+
+Following <https://stuartlab.org/signac/articles/overview>
+
+```{r}
+# Peaks and annotations
+peaks.CON <- read.table(
+  file = "/home/YJX-scATAC/CON-processed/outs/peaks.bed",
+  col.names = c("chr", "start", "end")
+)
+peaks.DM <- read.table(
+  file = "/home/YJX-scATAC/DM-processed/outs/peaks.bed",
+  col.names = c("chr", "start", "end")
+)
+
+gr.CON <- makeGRangesFromDataFrame(peaks.CON)
+gr.DM <- makeGRangesFromDataFrame(peaks.DM)
+combined.peaks <- reduce(x = c(gr.CON, gr.DM))
+peakwidths <- width(combined.peaks)
+combined.peaks <- combined.peaks[peakwidths  < 10000 & peakwidths > 20]
+ah <- AnnotationHub()
+query(ah, "EnsDb.Mmusculus.v98")
+ensdb_v98 <- ah[["AH75036"]]
+annotations <- GetGRangesFromEnsDb(ensdb = ensdb_v98)
+seqlevels(annotations) <- paste0('chr', seqlevels(annotations))
+genome(annotations) <- "mm10"
+```
+
+Fragment matrix
+
+```{r}
+md.CON <- read.table(
+  file = "/home/YJX-scATAC/CON-processed/outs/singlecell.csv",
+  stringsAsFactors = FALSE,
+  sep = ",",
+  header = TRUE,
+  row.names = 1
+)[-1, ] # remove the first row
+md.DM <- read.table(
+  file = "/home/YJX-scATAC/DM-processed/outs/singlecell.csv",
+  stringsAsFactors = FALSE,
+  sep = ",",
+  header = TRUE,
+  row.names = 1
+)[-1, ]
+md.CON <- md.CON[md.CON$passed_filters > 1000, ]
+md.DM <- md.DM[md.DM$passed_filters > 1000, ]
+frags.CON <- CreateFragmentObject(
+  path = "/home/YJX-scATAC/CON-processed/outs/fragments.tsv.gz",
+  cells = rownames(md.CON)
+)
+frags.DM <- CreateFragmentObject(
+  path = "/home/YJX-scATAC/DM-processed/outs/fragments.tsv.gz",
+  cells = rownames(md.DM)
+)
+CON.counts <- FeatureMatrix(
+  fragments = frags.CON,
+  features = combined.peaks,
+  cells = rownames(md.CON)
+)
+DM.counts <- FeatureMatrix(
+  fragments = frags.DM,
+  features = combined.peaks,
+  cells = rownames(md.DM)
+)
+```
+
+Create Chromatin Assay and annotation
+
+```{r}
+CON_assay <- CreateChromatinAssay(CON.counts, fragments = frags.CON)
+CON <- CreateSeuratObject(CON_assay, assay = "ATAC", meta.data=md.CON)
+DM_assay <- CreateChromatinAssay(DM.counts, fragments = frags.DM)
+DM <- CreateSeuratObject(DM_assay, assay = "ATAC", meta.data=md.DM)
+CON$dataset <- 'CON'
+DM$dataset <- 'DM'
+Annotation(CON) <- annotations
+Annotation(DM) <- annotations
+```
+
+## Quality control
+
+```{r}
+CONpeaks.keep <- seqnames(granges(CON)) %in% standardChromosomes(granges(CON))
+CON <- CON[as.vector(CONpeaks.keep), ]
+DMpeaks.keep <- seqnames(granges(DM)) %in% standardChromosomes(granges(DM))
+DM <- DM[as.vector(DMpeaks.keep), ]
+CON <- NucleosomeSignal(object = CON)
+DM <- NucleosomeSignal(object = DM)
+CON <- TSSEnrichment(object = CON)
+DM <- TSSEnrichment(object = DM)
+CON$pct_reads_in_peaks <- CON$peak_region_fragments / CON$passed_filters * 100
+DM$pct_reads_in_peaks <- DM$peak_region_fragments / DM$passed_filters * 100
+mm10_blacklist <- import("mm10.blacklist.bed")
+CON$blacklist_ratio <- FractionCountsInRegion(
+  object = CON, 
+  assay = 'ATAC',
+  regions = mm10_blacklist
+)
+DM$blacklist_ratio <- FractionCountsInRegion(
+  object = DM, 
+  assay = 'ATAC',
+  regions = mm10_blacklist
+)
+
+CON <- subset(
+  x = CON,
+  subset = peak_region_fragments > 5000 &
+    peak_region_fragments < 100000 &
+    pct_reads_in_peaks > 40 &
+    blacklist_ratio < 0.02 &
+    nucleosome_signal < 2 &
+    TSS.enrichment > 2
+)
+
+DM <- subset(
+  x = DM,
+  subset = peak_region_fragments > 5000 &
+    peak_region_fragments < 100000 &
+    pct_reads_in_peaks > 40 &
+    blacklist_ratio < 0.02 &
+    nucleosome_signal < 2 &
+    TSS.enrichment > 2
+)
+```
+
+## Dataset integration
+
+```{r}
+combined <- merge(
+  x = CON,
+  y = DM,
+  add.cell.ids = c("CON", "DM")
+)
+```
+
+## Dimensionality reduction and clustering
+
+```{r}
+set.seed(1234)
+combined <- RunTFIDF(combined)
+combined <- FindTopFeatures(combined, min.cutoff = 'q5')
+combined <- RunSVD(combined)
+combined <- RunUMAP(combined, dims = 2:30, reduction = 'lsi')
+combined <- FindNeighbors(object = combined, reduction = 'lsi', dims = 2:30)
+combined <- FindClusters(object = combined, algorithm = 3) 
+```
+
+## Gene activity matrix
+
+```{r}
+gene.activities <- GeneActivity(combined)
+combined[['RNA']] <- CreateAssayObject(counts = gene.activities)
+combined <- NormalizeData(
+  object = combined,
+  assay = 'RNA',
+  normalization.method = 'LogNormalize',
+  scale.factor = median(combined$nCount_RNA)
+)
+```
+
+## Differential accessibility analysis
+
+Using gene activity matrix to perform DAR analysis
+
+```{r}
+DefaultAssay(combined) <- "RNA"
+Idents(combined) <- "dataset"
+DAR <- FindMarkers(
+  combined,
+  ident.1 = "DM",
+  ident.2 = "CON",
+  assay = "RNA",
+  only.pos = FALSE,
+  test.use = "LR", 
+  latent.vars = "nCount_ATAC",
+  logfc.threshold = 0,
+  min.pct = 0.05
+)
+```
+
+## Cell Percentage
+
+```{r}
+Idents(combined) <- "seurat_clusters"
+cluster_table <- table(Idents(combined), combined$dataset)
+total_cells_per_group <- colSums(cluster_table)
+cluster_fraction <- sweep(cluster_table, 2, total_cells_per_group, FUN = "/")
+cluster_percent <- apply(cluster_fraction, 1, function(x) {
+  total <- sum(x)
+  round(100 * x / total, 2)
+})
+cluster_percent <- t(cluster_percent)
+write.csv(cluster_percent, file = "cluster_CON_DM_percentage.csv")
+df <- read.csv("cluster_CON_DM_percentage.csv", row.names = 1)
+colnames(df) <- c("Ctrl", "DM")
+df$cluster <- as.integer(rownames(df)) + 1
+df_long <- melt(df, id.vars = "cluster", variable.name = "group", value.name = "percent")
+df_long$cluster <- factor(df_long$cluster, levels = 15:1)
+ggplot(df_long, aes(x = group, y = cluster, fill = percent)) +
+  geom_text(aes(label = sprintf("%.2f", percent)), size = 3)
+  labs(x = "", y = "Cluster", fill = "%") +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+```
+
+## Motif analysis
+
+```{r}
+Idents(combined) <- "dataset"
+table(Idents(combined))
+DefaultAssay(combined) <- "ATAC"  
+
+pfm <- getMatrixSet(
+  x = JASPAR2020,
+  opts = list(collection = "CORE", tax_group = 'vertebrates', all_versions = FALSE)
+)
+
+# add motif information
+combined <- AddMotifs(
+  object = combined,
+  genome = BSgenome.Mmusculus.UCSC.mm10,
+  pfm = pfm
+)
+
+da_peaks <- FindMarkers(
+  object = combined,
+  ident.1 = 'DM',
+  ident.2 = 'CON',
+  only.pos = TRUE,
+  test.use = 'LR',
+  min.pct = 0.05,
+  latent.vars = 'nCount_ATAC'
+)
+top.da.peak <- rownames(da_peaks[da_peaks$p_val < 0.005 & da_peaks$pct.1 > 0.2, ])
+enriched.motifs <- FindMotifs(
+  object = combined,
+  features = top.da.peak
+)
+write.csv(enriched.motifs, file = "enriched_motifs.csv", row.names = FALSE)
+enriched.motifs <- read_csv("enriched_motifs.csv")
+motif_df <- enriched.motifs
+motif_df$motif <- rownames(motif_df)
+motif_df$log2FC <- log2(motif_df$fold.enrichment)
+motif_df$log10P <- -log10(motif_df$pvalue)
+motif_df$significance <- ifelse(
+  motif_df$pvalue <= 0.05 & motif_df$log2FC > 0,  
+  "Up",
+  "Not Significant"
+)
+xlim_max <- ceiling(max(abs(motif_df$log2FC), na.rm = TRUE))
+ggplot(motif_df, aes(x = log2FC, y = log10P, color = significance)) +
+  geom_point(size = 1) +
+  scale_color_manual(values = c("Up" = "#a7399b", "Not Significant" = "gray")) +
+  scale_x_continuous(limits = c(0, 3)) + 
+  theme_minimal() + 
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.border = element_rect(color = "black", fill = NA, size = 0.5),
+    legend.title = element_blank(),
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  labs(
+    title = "Motif Enrichment Volcano Plot",
+    x = expression(log[2]*"(Fold Enrichment)"),
+    y = expression(-log[10]*"(p-value)")
+  )
+
+```
+
+## VlnPlot and CoveragePlot
+
+```{r}
+VlnPlot(
+  combined,
+  features = "Sirpa",
+  assay = "RNA",
+  slot = "data",
+  pt.size = 0
+) + NoLegend() +
+  scale_fill_manual(values = color_codes)
+
+CoveragePlot(
+  object = combined,
+  region = "Sirpa",
+  annotation = TRUE,
+  peaks = TRUE,
+  group.by = "dataset",
+  window = 5,
+  extend.upstream = 5000,
+  extend.downstream = 5000
+)
+```
+
+## Pseudotime trajectory analysis
+
+### Overall plot
+
+```{r}
+DefaultAssay(combined) <- "ATAC"
+cds_rna <- as.cell_data_set(combined)
+cds_rna <- cluster_cells(cds_rna, reduction_method = "UMAP")
+cds_rna <- learn_graph(cds_rna, 
+                       use_partition = TRUE, 
+                       learn_graph_control = list( 
+                         euclidean_distance_ratio=0.1))  
+get_root_principal_node_by_cluster <- function(cds_rna, cluster_id = "9") {
+  cell_ids <- which(colData(cds_rna)$seurat_clusters == cluster_id)
+  closest_vertex <- cds_rna@principal_graph_aux[["UMAP"]]$pr_graph_cell_proj_closest_vertex
+  closest_vertex <- as.matrix(closest_vertex[colnames(cds_rna), ])
+  root_pr_node <- igraph::V(principal_graph(cds_rna)[["UMAP"]])$name[
+    as.numeric(names(which.max(table(closest_vertex[cell_ids, ]))))
+  ]
+  return(root_pr_node)
+}
+cds1 <- order_cells(cds_rna, 
+                    root_pr_nodes = get_root_principal_node_by_cluster(cds_rna, cluster_id = "9"),reduction_method = "UMAP")
+plot_cells(cds1,
+           color_cells_by = "pseudotime",
+           label_cell_groups = FALSE,
+           label_leaves = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           graph_label_size = 1.5,
+           #cell_size = 0.1, 
+           trajectory_graph_color = "black")+ coord_equal()
+```
+
+### Plotting selected region
+
+```{r}
+cds_sub <- choose_graph_segments(cds1, reduction_method = "UMAP")
+cells_segment <- colnames(cds_sub)
+colData(cds1)$highlight <- "Other"
+colData(cds1)$highlight[colnames(cds1) %in% cells_segment] <- "Selected"
+
+plot_cells(
+  cds1,
+  color_cells_by = "highlight",
+  label_cell_groups = FALSE,
+  label_leaves = FALSE,
+  label_branch_points = FALSE,
+  label_roots = FALSE,
+  graph_label_size = 1.5,
+  trajectory_graph_color = "black"
+) + scale_color_manual(values = c("Other" = "lightgrey", "Selected" = "#a020f0")) + coord_equal()+
+  guides(color = guide_legend(override.aes = list(shape = 16))) +
+  theme(legend.position = "none")
+```
+
+### ArchR-style plotting
+
+Choose selected cells to plot gene accessibility along the trajectory
+
+```{r}
+cds_sub <- choose_graph_segments(cds1, reduction_method = "UMAP")
+plot_cells(cds_sub,
+           color_cells_by = "pseudotime") + coord_equal()
+cells_segment <- colnames(cds_sub)
+cds_subset <- cds1[, colnames(cds1) %in% cells_segment]
+pseudotime_df <- data.frame(
+  cell = colnames(cds_subset),
+  pseudotime = pseudotime(cds_subset)
+)
+pseudotime_df$cell <- gsub("^CON_", "Ctrl#", pseudotime_df$cell)
+pseudotime_df$cell <- gsub("^DM_", "DM#", pseudotime_df$cell)
+write.table(pseudotime_df,
+            file = "pseudotime_metadata_sub.tsv",
+            sep = "\t",
+            quote = FALSE,
+            row.names = FALSE)
+cells_con <- gsub("^CON_", "", grep("^CON_", cells_segment, value = TRUE))
+cells_dm <- gsub("^DM_", "", grep("^DM_", cells_segment, value = TRUE))
+writeLines(cells_con, "cells_con_sub.txt")
+writeLines(cells_dm, "cells_dm_sub.txt")
+```
+
+filter out fragments according to barcodes
+
+```{bash}
+zcat /home/YJX-scATAC/CON-processed/outs/fragments.tsv.gz | grep -F -f /home/YJX-scATAC/ArchR/sub_traj/cells_con_sub.txt | bgzip > subset_fragments_CON.tsv.gz
+tabix -p bed subset_fragments_CON.tsv.gz
+
+zcat /home/YJX-scATAC/DM-processed/outs/fragments.tsv.gz | grep -F -f /home/YJX-scATAC/ArchR/sub_traj/cells_dm_sub.txt | bgzip > subset_fragments_dm.tsv.gz
+tabix -p bed subset_fragments_dm.tsv.gz
+```
+
+Create ArchR project (Following <https://www.archrproject.com/bookdown/index.html>)
+
+```{r}
+addArchRGenome("mm10")
+inputFiles <- c(
+  CON = "subset_fragments_CON.tsv.gz",
+  EXP = "subset_fragments_dm.tsv.gz"
+)
+names(inputFiles) <- c("Ctrl","DM")
+ArrowFiles <- createArrowFiles(
+  inputFiles = inputFiles,
+  sampleNames = names(inputFiles),
+  minTSS = 0,
+  minFrags = 0,
+  addTileMat = TRUE,
+  addGeneScoreMat = TRUE
+)
+proj <- ArchRProject(
+  ArrowFiles = ArrowFiles,
+  outputDirectory = "ArchR2Signac_featureplot_Project",
+  copyArrows = TRUE
+)
+proj <- addIterativeLSI(
+  ArchRProj = proj,
+  useMatrix = "TileMatrix", 
+  name = "IterativeLSI", 
+  iterations = 2, 
+  clusterParams = list( #See Seurat::FindClusters
+    resolution = c(0.2), 
+    sampleCells = 10000, 
+    n.start = 10
+  ), 
+  varFeatures = 25000, 
+  dimsToUse = 1:30
+)
+proj <- addClusters(
+  input = proj,
+  reducedDims = "IterativeLSI",
+  method = "Seurat",
+  name = "Clusters",
+  resolution = 0.8,
+  dimsToUse = 2:30
+)
+proj <- addUMAP(
+  ArchRProj = proj, 
+  reducedDims = "IterativeLSI", 
+  name = "UMAP", 
+  nNeighbors = 30, 
+  minDist = 0.5, 
+  metric = "cosine"
+)
+```
+
+Plotting gene accessibility along the trajectory
+
+```{r}
+pseudo <- read.delim("pseudotime_metadata_sub.tsv",
+                     header = TRUE,
+                     stringsAsFactors = FALSE)
+head(pseudo)
+pseudo <- pseudo %>%
+  mutate(PseudoCluster = cut_number(pseudotime, n = 7, labels = c(1,2,3,4,5,6,7)))
+
+proj <- addCellColData(
+  ArchRProj = proj,
+  data = as.character(pseudo$PseudoCluster),
+  name = "PseudoCluster",
+  cells = pseudo$cell,
+  force = TRUE
+)
+proj <- addTrajectory(
+  ArchRProj = proj,
+  name = "PseudoCluster_basedTraj",
+  trajectory = c("1","2","3","4","5","6","7"),
+  groupBy = "PseudoCluster",
+  embedding = "UMAP",
+  force = TRUE
+)
+proj <- addImputeWeights(proj)
+geneName <- c("Sirpa","Csf1r","Cd68","Itgam")
+p1 <- plotTrajectory(
+  proj, 
+  trajectory = "PseudoCluster_basedTraj", 
+  colorBy = "GeneScoreMatrix", 
+  name = geneName, 
+  continuousSet = "horizonExtra"
+)
+```
+
+Plotting umap using ImputeWeights in ArchR
+
+```{r}
+# extract umap coordinates
+umap_signac <- Embeddings(combined, "umap")
+head(umap_signac)
+
+signac_cells <- rownames(umap_signac)
+archr_cells_map <- gsub("^CON_", "Ctrl#", signac_cells)
+archr_cells_map <- gsub("^DM_",  "DM#",   archr_cells_map)
+
+map_df <- data.frame(signac = signac_cells, archr = archr_cells_map, stringsAsFactors = FALSE)
+archr_all <- ArchR::getCellNames(proj)
+common_archr <- intersect(map_df$archr, archr_all)
+rownames(umap_signac) <- archr_cells_map
+umap_signac <- as.matrix(umap_signac)
+colnames(umap_signac) <- c(
+  "IterativeLSI#UMAP_Dimension_1",
+  "IterativeLSI#UMAP_Dimension_2"
+)
+proj@embeddings$SignacUMAP <- SimpleList(
+  embedding = umap_signac
+)
+proj <- addImputeWeights(proj)
+geneName <- "Sirpa"
+plotEmbedding(
+  ArchRProj = proj,
+  embedding = "SignacUMAP",   
+  colorBy = "GeneScoreMatrix",
+  name = geneName,
+  ratioYX = 2,
+  pal = cont_pal(256)
+)
+```
+
+# End
+
+```{r}
+sessionInfo()
+```
