@@ -282,34 +282,62 @@ enriched.motifs <- FindMotifs(
   features = top.da.peak
 )
 write.csv(enriched.motifs, file = "enriched_motifs.csv", row.names = FALSE)
-enriched.motifs <- read_csv("enriched_motifs.csv")
-motif_df <- enriched.motifs
-motif_df$motif <- rownames(motif_df)
-motif_df$log2FC <- log2(motif_df$fold.enrichment)
-motif_df$log10P <- -log10(motif_df$pvalue)
-motif_df$significance <- ifelse(
-  motif_df$pvalue <= 0.05 & motif_df$log2FC > 0,  
-  "Up",
-  "Not Significant"
-)
-xlim_max <- ceiling(max(abs(motif_df$log2FC), na.rm = TRUE))
-ggplot(motif_df, aes(x = log2FC, y = log10P, color = significance)) +
-  geom_point(size = 1) +
-  scale_color_manual(values = c("Up" = "#a7399b", "Not Significant" = "gray")) +
-  scale_x_continuous(limits = c(0, 3)) + 
-  theme_minimal() + 
-  theme(
-    panel.grid = element_blank(),
-    axis.line = element_line(color = "black"),
-    panel.border = element_rect(color = "black", fill = NA, size = 0.5),
-    legend.title = element_blank(),
-    plot.title = element_text(hjust = 0.5)
-  ) +
-  labs(
-    title = "Motif Enrichment Volcano Plot",
-    x = expression(log[2]*"(Fold Enrichment)"),
-    y = expression(-log[10]*"(p-value)")
+
+motif_df <- read_csv("enriched_motifs.csv")
+motif_df <- motif_df %>%
+  mutate(logP = -log10(p.adjust))#%>%
+
+highlight_list <- list(
+  "Positive regulation of glycolytic process" = c("MLX", "Arnt", "MLXIPL", "MYC"),
+  "Macrophage differentiation" = c("CEBPE", "CEBPA", "SPIB", "FOSL2", "SPI1"),
+  "Myeloid cell differentiation" = c(
+    "FOS", "BATF", "CREB1", "CEBPE", "JUN", "SP1", "CEBPA", "JUNB", 
+    "CEBPB", "RUNX1", "KLF2", "SPIB", "SP3", "SPI1", "BATF3", "CEBPG", "ZBTB7A"
   )
+)
+
+for (go_term in names(highlight_list)) {
+  highlight_motifs <- highlight_list[[go_term]]
+  motif_df$highlight <- motif_df$motif.name %in% highlight_motifs
+  file_name <- paste0("motif_volcano-", go_term, ".pdf")
+  pdf(file_name, width = 5, height = 5)
+  print(
+    ggplot(motif_df, aes(x = fold.enrichment, y = logP)) +
+      geom_point(color = "grey", alpha = 0.7, size = 1.5) +
+      geom_point(data = subset(motif_df, highlight), color = "#a7399b", size = 1.5) +
+      geom_text_repel(data = subset(motif_df, highlight),
+                      aes(label = motif.name),
+                      size = 7,
+                      max.overlaps = 100,
+                      box.padding = 0.3,
+                      point.padding = 0.2) +
+      theme_minimal() +
+      theme(
+        panel.grid = element_blank(),
+        axis.line = element_blank(),
+        axis.ticks = element_line(color = "black"),
+        axis.ticks.length = unit(0.25, "cm"),
+        panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+        legend.title = element_blank(),
+        axis.title = element_text(size = 18),
+        axis.text.x = element_text(size = 18, vjust = 0),
+        axis.text.y = element_text(size = 18, angle = 90, vjust = 0.5, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5, size = 18)
+      ) +
+      labs(
+        title = go_term,
+        x = "Fold enrichment",
+        y = expression(-log[10]*"(p-adj)")
+      ) +
+      scale_y_continuous(breaks = seq(0, max(motif_df$logP, na.rm = TRUE), by = 5)) +
+      scale_x_continuous(breaks = seq(
+        floor(min(motif_df$fold.enrichment, na.rm = TRUE)),
+        ceiling(max(motif_df$fold.enrichment, na.rm = TRUE)),
+        by = 0.5
+      ))
+  )
+  dev.off()
+}
 
 ```
 
