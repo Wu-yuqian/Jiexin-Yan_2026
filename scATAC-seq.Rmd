@@ -317,7 +317,7 @@ for (go_term in names(highlight_list)) {
         axis.line = element_blank(),
         axis.ticks = element_line(color = "black"),
         axis.ticks.length = unit(0.25, "cm"),
-        panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+        panel.border = element_rect(color = "black", fill = NA, size = 0.5),
         legend.title = element_blank(),
         axis.title = element_text(size = 18),
         axis.text.x = element_text(size = 18, vjust = 0),
