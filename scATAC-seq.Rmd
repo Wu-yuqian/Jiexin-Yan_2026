@@ -448,7 +448,7 @@ writeLines(cells_con, "cells_con_sub.txt")
 writeLines(cells_dm, "cells_dm_sub.txt")
 ```
 
-filter out fragments according to barcodes
+Filter out fragments according to barcodes
 
 ```{bash}
 zcat /home/YJX-scATAC/CON-processed/outs/fragments.tsv.gz | grep -F -f /home/YJX-scATAC/ArchR/sub_traj/cells_con_sub.txt | bgzip > subset_fragments_CON.tsv.gz
