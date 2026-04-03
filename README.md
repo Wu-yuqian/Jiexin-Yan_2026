@@ -2,4 +2,4 @@
 Script for the analysis of the scATAC-seq data
 
 Zenodo:
-<img width="191" height="20" alt="image" src="https://github.com/user-attachments/assets/88b7ca4e-523e-409c-a753-ca179bd90dd9" />
+[Zenodo DOI](https://doi.org/10.5281/zenodo.19394188)
